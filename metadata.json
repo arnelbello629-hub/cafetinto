@@ -1,0 +1,6 @@
+{
+  "name": "Café Tinto POS",
+  "description": "A comprehensive Point of Sale system for coffee shops featuring inventory management, customer loyalty programs, and order history.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
