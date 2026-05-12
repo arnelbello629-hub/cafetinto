@@ -7,9 +7,25 @@ import path from "path";
 
 const cwd = process.cwd();
 
-/** MySQL when `MYSQL_HOST` + `MYSQL_DATABASE` are set; otherwise SQLite (`data/cafetinto.db` by default). */
+/** Prefer `DB_*`; fall back to `MYSQL_*`. MySQL when host + database name are set; otherwise SQLite. */
+function mysqlHost(): string | undefined {
+  const h = process.env.DB_HOST?.trim() || process.env.MYSQL_HOST?.trim();
+  return h || undefined;
+}
+
+function mysqlDatabaseName(): string | undefined {
+  const d = process.env.DB_NAME?.trim() || process.env.MYSQL_DATABASE?.trim();
+  return d || undefined;
+}
+
 export function useMysql(): boolean {
-  return Boolean(process.env.MYSQL_HOST?.trim() && process.env.MYSQL_DATABASE?.trim());
+  return Boolean(mysqlHost() && mysqlDatabaseName());
+}
+
+/** Strip CRLF junk and spaces often pasted into `.env` on Windows. */
+function mysqlPassword(): string {
+  const raw = process.env.DB_PASSWORD ?? process.env.MYSQL_PASSWORD ?? "";
+  return raw.replace(/\r/g, "").trim();
 }
 
 let sqliteDb: Database.Database | null = null;
@@ -164,29 +180,71 @@ function ensureSqlite(): Database.Database {
   return sqliteDb;
 }
 
+/** TLS for managed MySQL (Aiven). `DB_SSL=0` / `MYSQL_SSL=0` disables. If unset, SSL is on for `*.aivencloud.com`. `DB_SSL_STRICT=1` sets certificate verification. */
+function mysqlSslFromEnv(host: string): { rejectUnauthorized: boolean } | undefined {
+  const raw = (process.env.DB_SSL ?? process.env.MYSQL_SSL)?.trim().toLowerCase();
+  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") {
+    return undefined;
+  }
+  const explicitOn =
+    raw === "1" || raw === "true" || raw === "yes";
+  const aivenHost = host.includes(".aivencloud.com");
+  if (!explicitOn && !aivenHost) {
+    return undefined;
+  }
+  const strict =
+    (process.env.DB_SSL_STRICT ?? process.env.MYSQL_SSL_STRICT)?.trim().toLowerCase();
+  const rejectUnauthorized =
+    strict === "1" || strict === "true" || strict === "yes";
+  return { rejectUnauthorized };
+}
+
 async function ensureMysqlPool(): Promise<Pool> {
   if (mysqlPool) return mysqlPool;
+  const host = mysqlHost()!;
+  const database = mysqlDatabaseName()!;
+  const port = Number(process.env.DB_PORT || process.env.MYSQL_PORT || 3306);
+  const user = (process.env.DB_USER || process.env.MYSQL_USER || "root").trim();
+  const password = mysqlPassword();
+  const ssl = mysqlSslFromEnv(host);
   mysqlPool = mysql.createPool({
-    host: process.env.MYSQL_HOST!.trim(),
-    port: Number(process.env.MYSQL_PORT || 3306),
-    user: (process.env.MYSQL_USER || "root").trim(),
-    password: process.env.MYSQL_PASSWORD ?? "",
-    database: process.env.MYSQL_DATABASE!.trim(),
+    host,
+    port,
+    user,
+    password,
+    database,
     waitForConnections: true,
     connectionLimit: 10,
+    queueLimit: 0,
     decimalNumbers: true,
+    ...(ssl ? { ssl } : {}),
   });
-  for (const stmt of MYSQL_TABLES) {
-    await mysqlPool.query(stmt);
+  try {
+    for (const stmt of MYSQL_TABLES) {
+      await mysqlPool.query(stmt);
+    }
+  } catch (e: unknown) {
+    await mysqlPool.end().catch(() => {});
+    mysqlPool = null;
+    const err = e as { errno?: number; code?: string };
+    if (err?.code === "ER_ACCESS_DENIED_ERROR" || err?.errno === 1045) {
+      throw new Error(
+        "MySQL login failed (wrong user/password, or password has extra spaces/line breaks in .env). " +
+          "In Aiven: open the service → Users → copy the current `avnadmin` password into DB_PASSWORD, save .env, retry. " +
+          "If it still fails, add your public IP under the service firewall rules.",
+        { cause: e }
+      );
+    }
+    throw e;
   }
-  console.info(`[db] MySQL: ${process.env.MYSQL_HOST}:${process.env.MYSQL_PORT || 3306}/${process.env.MYSQL_DATABASE}`);
+  console.info(`[db] MySQL: ${host}:${port}/${database}${ssl ? " (SSL)" : ""}`);
   return mysqlPool;
 }
 
 async function ensureUsersPasswordHashColumn(): Promise<void> {
   if (useMysql()) {
     const pool = await ensureMysqlPool();
-    const dbName = process.env.MYSQL_DATABASE!.trim();
+    const dbName = mysqlDatabaseName()!;
     const [rows] = await pool.execute<RowDataPacket[]>(
       `SELECT COUNT(*) AS cnt FROM information_schema.COLUMNS
        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'users' AND COLUMN_NAME = 'passwordHash'`,
@@ -210,7 +268,7 @@ async function ensureUsersPasswordHashColumn(): Promise<void> {
 async function ensureOrdersIsActiveColumn(): Promise<void> {
   if (useMysql()) {
     const pool = await ensureMysqlPool();
-    const dbName = process.env.MYSQL_DATABASE!.trim();
+    const dbName = mysqlDatabaseName()!;
     const [rows] = await pool.execute<RowDataPacket[]>(
       `SELECT COUNT(*) AS cnt FROM information_schema.COLUMNS
        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'isActive'`,

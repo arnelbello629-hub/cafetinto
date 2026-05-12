@@ -4,10 +4,31 @@ import path from "path";
 import Database from "better-sqlite3";
 import mysql from "mysql2/promise";
 
-function reqEnv(name: string): string {
-  const v = process.env[name]?.trim();
-  if (!v) throw new Error(`Missing required env: ${name}`);
-  return v;
+function mysqlSslFromEnv(host: string): { rejectUnauthorized: boolean } | undefined {
+  const raw = (process.env.DB_SSL ?? process.env.MYSQL_SSL)?.trim().toLowerCase();
+  if (raw === "0" || raw === "false" || raw === "no" || raw === "off") {
+    return undefined;
+  }
+  const explicitOn = raw === "1" || raw === "true" || raw === "yes";
+  const aivenHost = host.includes(".aivencloud.com");
+  if (!explicitOn && !aivenHost) {
+    return undefined;
+  }
+  const strict = (process.env.DB_SSL_STRICT ?? process.env.MYSQL_SSL_STRICT)?.trim().toLowerCase();
+  const rejectUnauthorized = strict === "1" || strict === "true" || strict === "yes";
+  return { rejectUnauthorized };
+}
+
+function reqMysqlHost(): string {
+  const h = process.env.DB_HOST?.trim() || process.env.MYSQL_HOST?.trim();
+  if (!h) throw new Error("Missing DB_HOST or MYSQL_HOST");
+  return h;
+}
+
+function reqMysqlDatabase(): string {
+  const d = process.env.DB_NAME?.trim() || process.env.MYSQL_DATABASE?.trim();
+  if (!d) throw new Error("Missing DB_NAME or MYSQL_DATABASE");
+  return d;
 }
 
 function resolveSqlitePath(): string {
@@ -125,11 +146,13 @@ function buildInsert(table: TableName, row: Record<string, unknown>) {
 async function main() {
   const sqlitePath = resolveSqlitePath();
 
-  const host = reqEnv("MYSQL_HOST");
-  const port = Number(process.env.MYSQL_PORT || 3306);
-  const user = (process.env.MYSQL_USER || "root").trim();
-  const password = process.env.MYSQL_PASSWORD ?? "";
-  const database = reqEnv("MYSQL_DATABASE");
+  const host = reqMysqlHost();
+  const port = Number(process.env.DB_PORT || process.env.MYSQL_PORT || 3306);
+  const user = (process.env.DB_USER || process.env.MYSQL_USER || "root").trim();
+  const password = (process.env.DB_PASSWORD ?? process.env.MYSQL_PASSWORD ?? "")
+    .replace(/\r/g, "")
+    .trim();
+  const database = reqMysqlDatabase();
 
   const archiveSqlite = process.argv.includes("--archive-sqlite");
 
@@ -139,6 +162,8 @@ async function main() {
   const sqlite = new Database(sqlitePath, { readonly: true });
   sqlite.pragma("foreign_keys = ON");
 
+  const ssl = mysqlSslFromEnv(host);
+
   const pool = mysql.createPool({
     host,
     port,
@@ -147,7 +172,9 @@ async function main() {
     database,
     waitForConnections: true,
     connectionLimit: 5,
+    queueLimit: 0,
     decimalNumbers: true,
+    ...(ssl ? { ssl } : {}),
   });
 
   for (const stmt of MYSQL_TABLES) await pool.query(stmt);

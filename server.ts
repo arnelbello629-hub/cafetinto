@@ -1,5 +1,5 @@
+import "./load-env.ts";
 import express from "express";
-import "dotenv/config";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import apiRoutes from "./src/server/routes/index.ts";
