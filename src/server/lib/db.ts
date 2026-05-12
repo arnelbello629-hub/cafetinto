@@ -78,6 +78,7 @@ const SQLITE_DDL = `
     name TEXT,
     price REAL,
     quantity INTEGER,
+    cancelled INTEGER DEFAULT 0,
     FOREIGN KEY(orderId) REFERENCES orders(id),
     FOREIGN KEY(productId) REFERENCES products(id)
   );
@@ -136,6 +137,7 @@ const MYSQL_TABLES: string[] = [
     name VARCHAR(255),
     price DECIMAL(10,2),
     quantity INT,
+    cancelled TINYINT(1) NOT NULL DEFAULT 0,
     FOREIGN KEY (orderId) REFERENCES orders(id),
     FOREIGN KEY (productId) REFERENCES products(id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
@@ -292,6 +294,33 @@ async function ensureOrdersIsActiveColumn(): Promise<void> {
   d.exec("UPDATE orders SET isActive = 1 WHERE isActive IS NULL");
 }
 
+async function ensureOrderItemsCancelledColumn(): Promise<void> {
+  if (useMysql()) {
+    const pool = await ensureMysqlPool();
+    const dbName = mysqlDatabaseName()!;
+    const [rows] = await pool.execute<RowDataPacket[]>(
+      `SELECT COUNT(*) AS cnt FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'order_items' AND COLUMN_NAME = 'cancelled'`,
+      [dbName]
+    );
+    if (Number(rows[0]?.cnt ?? 0) === 0) {
+      await pool.execute(
+        "ALTER TABLE order_items ADD COLUMN cancelled TINYINT(1) NOT NULL DEFAULT 0"
+      );
+      console.info("[db] Added order_items.cancelled (MySQL)");
+    }
+    await pool.execute("UPDATE order_items SET cancelled = 0 WHERE cancelled IS NULL");
+    return;
+  }
+  const d = ensureSqlite();
+  const cols = d.prepare("PRAGMA table_info(order_items)").all() as { name: string }[];
+  if (!cols.some((c) => c.name === "cancelled")) {
+    d.exec("ALTER TABLE order_items ADD COLUMN cancelled INTEGER DEFAULT 0");
+    console.info("[db] Added order_items.cancelled (SQLite)");
+  }
+  d.exec("UPDATE order_items SET cancelled = 0 WHERE cancelled IS NULL");
+}
+
 /** Open DB pool / file and ensure tables exist. */
 export async function initDatabase(): Promise<void> {
   if (useMysql()) {
@@ -301,6 +330,7 @@ export async function initDatabase(): Promise<void> {
   }
   await ensureUsersPasswordHashColumn();
   await ensureOrdersIsActiveColumn();
+  await ensureOrderItemsCancelledColumn();
 }
 
 export type SqlTx = {

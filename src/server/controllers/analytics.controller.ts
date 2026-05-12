@@ -24,21 +24,21 @@ export const getDashboardStats = async (req: Request, res: Response) => {
 
     const revenueResult = startTime > 0
       ? await dbGet<{ total: number | null }>(
-          "SELECT SUM(totalAmount) as total FROM orders WHERE createdAt >= ? AND COALESCE(isActive, 1) = 1",
+          "SELECT SUM(totalAmount) as total FROM orders WHERE createdAt >= ? AND COALESCE(isActive, 1) = 1 AND COALESCE(status, 'completed') != 'cancelled'",
           [startTime]
         )
       : await dbGet<{ total: number | null }>(
-          "SELECT SUM(totalAmount) as total FROM orders WHERE COALESCE(isActive, 1) = 1"
+          "SELECT SUM(totalAmount) as total FROM orders WHERE COALESCE(isActive, 1) = 1 AND COALESCE(status, 'completed') != 'cancelled'"
         );
     const totalRevenue = Number(revenueResult?.total) || 0;
 
     const countResult = startTime > 0
       ? await dbGet<{ count: number }>(
-          "SELECT COUNT(*) as count FROM orders WHERE createdAt >= ? AND COALESCE(isActive, 1) = 1",
+          "SELECT COUNT(*) as count FROM orders WHERE createdAt >= ? AND COALESCE(isActive, 1) = 1 AND COALESCE(status, 'completed') != 'cancelled'",
           [startTime]
         )
       : await dbGet<{ count: number }>(
-          "SELECT COUNT(*) as count FROM orders WHERE COALESCE(isActive, 1) = 1"
+          "SELECT COUNT(*) as count FROM orders WHERE COALESCE(isActive, 1) = 1 AND COALESCE(status, 'completed') != 'cancelled'"
         );
     const totalOrders = Number(countResult?.count) || 0;
     const avgOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
@@ -50,7 +50,8 @@ export const getDashboardStats = async (req: Request, res: Response) => {
           FROM order_items oi
           JOIN orders o ON oi.orderId = o.id
           JOIN products p ON oi.productId = p.id
-          WHERE o.createdAt >= ? AND COALESCE(o.isActive, 1) = 1
+          WHERE o.createdAt >= ? AND COALESCE(o.isActive, 1) = 1 AND COALESCE(o.status, 'completed') != 'cancelled'
+            AND COALESCE(oi.cancelled, 0) = 0
           GROUP BY oi.productId, p.name, p.category
           ORDER BY SUM(oi.quantity) DESC
           LIMIT 5`,
@@ -61,7 +62,8 @@ export const getDashboardStats = async (req: Request, res: Response) => {
           FROM order_items oi
           JOIN orders o ON oi.orderId = o.id
           JOIN products p ON oi.productId = p.id
-          WHERE COALESCE(o.isActive, 1) = 1
+          WHERE COALESCE(o.isActive, 1) = 1 AND COALESCE(o.status, 'completed') != 'cancelled'
+            AND COALESCE(oi.cancelled, 0) = 0
           GROUP BY oi.productId, p.name, p.category
           ORDER BY SUM(oi.quantity) DESC
           LIMIT 5`
@@ -74,7 +76,8 @@ export const getDashboardStats = async (req: Request, res: Response) => {
           FROM order_items oi
           JOIN orders o ON oi.orderId = o.id
           JOIN products p ON oi.productId = p.id
-          WHERE o.createdAt >= ? AND COALESCE(o.isActive, 1) = 1
+          WHERE o.createdAt >= ? AND COALESCE(o.isActive, 1) = 1 AND COALESCE(o.status, 'completed') != 'cancelled'
+            AND COALESCE(oi.cancelled, 0) = 0
           GROUP BY p.category`,
             [startTime]
           )
@@ -83,7 +86,8 @@ export const getDashboardStats = async (req: Request, res: Response) => {
           FROM order_items oi
           JOIN orders o ON oi.orderId = o.id
           JOIN products p ON oi.productId = p.id
-          WHERE COALESCE(o.isActive, 1) = 1
+          WHERE COALESCE(o.isActive, 1) = 1 AND COALESCE(o.status, 'completed') != 'cancelled'
+            AND COALESCE(oi.cancelled, 0) = 0
           GROUP BY p.category`
           );
 
@@ -110,14 +114,17 @@ export const getDashboardStats = async (req: Request, res: Response) => {
       `SELECT o.*, u.displayName
       FROM orders o
       LEFT JOIN users u ON o.userId = u.id
-      WHERE COALESCE(o.isActive, 1) = 1
+      WHERE COALESCE(o.isActive, 1) = 1 AND COALESCE(o.status, 'completed') != 'cancelled'
       ORDER BY o.createdAt DESC
       LIMIT 10`
     );
 
     const activity = await Promise.all(
       recentOrders.map(async (order) => {
-        const items = await dbAll<{ name: string }>("SELECT name FROM order_items WHERE orderId = ?", [order.id]);
+        const items = await dbAll<{ name: string }>(
+          "SELECT name FROM order_items WHERE orderId = ? AND COALESCE(cancelled, 0) = 0",
+          [order.id]
+        );
         const label =
           (order.displayName && String(order.displayName).trim()) ||
           (order.userId && String(order.userId).trim()) ||

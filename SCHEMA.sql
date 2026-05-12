@@ -39,6 +39,7 @@ CREATE TABLE order_items (
     name VARCHAR(255),
     price DECIMAL(10,2),
     quantity INT,
+    cancelled TINYINT(1) NOT NULL DEFAULT 0,
     FOREIGN KEY (orderId) REFERENCES orders(id),
     FOREIGN KEY (productId) REFERENCES products(id)
 );

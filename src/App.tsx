@@ -72,12 +72,15 @@ interface ExpenseRow {
 }
 
 interface OrderLineItem {
-  id?: number;
+  /** SQLite/MySQL row id (API may send number or numeric string). */
+  id?: number | string;
   orderId?: string;
   productId: string;
   name: string;
   price: number;
   quantity: number;
+  /** 1 = cancelled line; excluded from order total & sales */
+  cancelled?: number;
 }
 
 interface OrderRow {
@@ -2699,15 +2702,29 @@ function ExpensesView() {
   );
 }
 
+/** DB row id for order_lines (MySQL may stringify INT). */
+function orderLineDbId(item: OrderLineItem): number | null {
+  const raw = item.id;
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && /^\d+$/.test(raw.trim())) return parseInt(raw.trim(), 10);
+  return null;
+}
+
 function HistoryView({ userId }: { userId: string }) {
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [selectedOrder, setSelectedOrder] = useState<OrderRow | null>(null);
+  /** Which line is showing inline confirm (avoid confusing browser OK/Cancel). */
+  const [pendingLineCancelId, setPendingLineCancelId] = useState<number | null>(null);
 
   useEffect(() => {
     fetchOrders();
   }, [userId]);
+
+  useEffect(() => {
+    setPendingLineCancelId(null);
+  }, [selectedOrder?.id]);
 
   const fetchOrders = async () => {
     setLoading(true);
@@ -2749,6 +2766,28 @@ function HistoryView({ userId }: { userId: string }) {
     }
   };
 
+  const isLineCancelled = (item: OrderLineItem) => Number(item.cancelled) === 1;
+
+  const cancelOrderLine = async (orderId: string, itemId: number) => {
+    try {
+      const res = await fetch(`/api/orders/${orderId}/items/${itemId}/cancel`, { method: "PATCH" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = typeof (body as { error?: string }).error === "string" ? (body as { error: string }).error : "Could not cancel line";
+        alert(msg);
+        return;
+      }
+      const updated = body as OrderRow;
+      setPendingLineCancelId(null);
+      setOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, ...updated } : o)));
+      setSelectedOrder((prev) =>
+        prev && prev.id === orderId ? { ...prev, ...updated } : prev
+      );
+    } catch (err) {
+      console.error("Failed to cancel line item", err);
+    }
+  };
+
   const friendlyIds = useMemo(() => {
     const sorted = [...orders].sort(
       (a, b) => (a.createdAt || 0) - (b.createdAt || 0)
@@ -2773,8 +2812,9 @@ function HistoryView({ userId }: { userId: string }) {
     );
   });
 
-  const totalSales = filteredOrders.reduce((sum, o) => sum + (o.totalAmount || 0), 0);
-  const orderCount = filteredOrders.length;
+  const ordersCountedForSales = filteredOrders.filter((o) => o.status !== "cancelled");
+  const totalSales = ordersCountedForSales.reduce((sum, o) => sum + (o.totalAmount || 0), 0);
+  const orderCount = ordersCountedForSales.length;
 
   return (
     <div className="flex flex-col gap-6">
@@ -2807,11 +2847,11 @@ function HistoryView({ userId }: { userId: string }) {
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="rounded-xl border border-stone-200 bg-white p-5">
-          <p className="text-xs text-stone-500">Sales (filtered)</p>
+          <p className="text-xs text-stone-500">Sales (filtered, excl. cancelled)</p>
           <p className="mt-1 text-2xl font-semibold tabular-nums text-stone-900">₱{totalSales.toFixed(2)}</p>
         </div>
         <div className="rounded-xl border border-stone-200 bg-white p-5">
-          <p className="text-xs text-stone-500">Orders</p>
+          <p className="text-xs text-stone-500">Orders (excl. cancelled)</p>
           <p className="mt-1 text-2xl font-semibold tabular-nums text-stone-900">{orderCount}</p>
         </div>
       </div>
@@ -2842,7 +2882,9 @@ function HistoryView({ userId }: { userId: string }) {
                 </td>
               </tr>
             ) : (
-              filteredOrders.map((order) => (
+              filteredOrders.map((order) => {
+                const activeLineItems = order.items?.filter((it) => !isLineCancelled(it)) ?? [];
+                return (
                 <tr
                   key={order.id}
                   className="group cursor-pointer transition-colors hover:bg-stone-50/80"
@@ -2857,17 +2899,17 @@ function HistoryView({ userId }: { userId: string }) {
                   </td>
                   <td className="hidden px-4 py-3 sm:table-cell sm:px-5">
                     <div className="flex -space-x-1.5">
-                      {order.items?.slice(0, 3).map((item, i: number) => (
+                      {activeLineItems.slice(0, 3).map((item, i: number) => (
                         <div
-                          key={i}
+                          key={item.id ?? `pv-${i}`}
                           className="flex h-7 w-7 items-center justify-center rounded-md border border-white bg-stone-100 text-[10px] font-medium text-stone-600"
                         >
                           {item.name[0]}
                         </div>
                       ))}
-                      {order.items?.length > 3 && (
+                      {activeLineItems.length > 3 && (
                         <div className="flex h-7 w-7 items-center justify-center rounded-md border border-white bg-stone-800 text-[10px] font-medium text-white">
-                          +{order.items.length - 3}
+                          +{activeLineItems.length - 3}
                         </div>
                       )}
                     </div>
@@ -2896,7 +2938,8 @@ function HistoryView({ userId }: { userId: string }) {
                     </button>
                   </td>
                 </tr>
-              ))
+              );
+              })
             )}
           </tbody>
         </table>
@@ -2988,15 +3031,90 @@ function HistoryView({ userId }: { userId: string }) {
 
                 <div>
                   <p className="mb-2 text-xs font-medium text-stone-500">Items</p>
+                  <p className="mb-2 text-xs text-stone-400">
+                    Remove a line to update the total; quantity is returned to inventory stock.
+                  </p>
                   <div className="scrollbar-hide max-h-[240px] space-y-2 overflow-y-auto">
-                    {selectedOrder.items?.map((item, i: number) => (
-                      <div key={i} className="flex items-center justify-between rounded-lg border border-stone-100 px-3 py-2.5 text-sm">
-                        <span className="text-stone-600">
-                          {item.quantity}× {item.name}
-                        </span>
-                        <span className="font-medium tabular-nums text-stone-900">₱{(item.price * item.quantity).toFixed(2)}</span>
-                      </div>
-                    ))}
+                    {selectedOrder.items?.map((item, i: number) => {
+                      const lineCancelled = isLineCancelled(item);
+                      const lineTotal = item.price * item.quantity;
+                      const dbId = orderLineDbId(item);
+                      const isConfirming = dbId != null && pendingLineCancelId === dbId;
+                      return (
+                        <div
+                          key={item.id ?? `ln-${i}`}
+                          className={`flex flex-col gap-2 rounded-lg border px-3 py-2.5 text-sm sm:flex-row sm:items-center sm:justify-between ${
+                            lineCancelled ? "border-stone-100 bg-stone-50/90" : "border-stone-100"
+                          }`}
+                        >
+                          <div className="flex min-w-0 flex-1 items-start justify-between gap-3 sm:items-center">
+                            <span
+                              className={
+                                lineCancelled ? "text-stone-400 line-through" : "text-stone-600"
+                              }
+                            >
+                              {item.quantity}× {item.name}
+                              {lineCancelled && (
+                                <span className="ml-2 inline-block rounded bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-700">
+                                  Cancelled
+                                </span>
+                              )}
+                            </span>
+                            <span
+                              className={`shrink-0 font-medium tabular-nums ${
+                                lineCancelled ? "text-stone-400 line-through" : "text-stone-900"
+                              }`}
+                            >
+                              ₱{lineTotal.toFixed(2)}
+                            </span>
+                          </div>
+                          {!lineCancelled &&
+                            selectedOrder.status !== "cancelled" &&
+                            dbId != null &&
+                            (isConfirming ? (
+                              <div className="flex shrink-0 flex-col items-stretch gap-2 sm:items-end">
+                                <p className="text-center text-[11px] text-stone-600 sm:text-right">
+                                  Remove from sale and return{" "}
+                                  <span className="font-semibold tabular-nums">{item.quantity}</span> to stock?
+                                </p>
+                                <div className="flex justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setPendingLineCancelId(null);
+                                    }}
+                                    className="rounded-md border border-stone-200 px-2.5 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50"
+                                  >
+                                    Back
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void cancelOrderLine(selectedOrder.id, dbId);
+                                    }}
+                                    className="rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-700"
+                                  >
+                                    Remove item
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setPendingLineCancelId(dbId);
+                                }}
+                                className="shrink-0 rounded-md border border-red-100 px-2.5 py-1 text-xs font-medium text-red-700 hover:bg-red-50"
+                              >
+                                Cancel line
+                              </button>
+                            ))}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 

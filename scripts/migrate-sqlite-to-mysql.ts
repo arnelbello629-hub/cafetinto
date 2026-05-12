@@ -86,6 +86,7 @@ const MYSQL_TABLES: string[] = [
     name VARCHAR(255),
     price DECIMAL(10,2),
     quantity INT,
+    cancelled TINYINT(1) NOT NULL DEFAULT 0,
     FOREIGN KEY (orderId) REFERENCES orders(id),
     FOREIGN KEY (productId) REFERENCES products(id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
